@@ -14,22 +14,102 @@ from langchain_openai import ChatOpenAI
 from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import PromptTemplate
 
-# Descargar base de datos
+# Descargar base de datos (versión robusta)
 @st.cache_data(ttl=3600)
 def download_database():
     db_path = "ecommerce.db"
-    if os.path.exists(db_path) and os.path.getsize(db_path) > 1000:
-        return db_path
-    file_id = "1YDmVjf5Nrz9Llgtka3KQMBUKwsnSF5vk"
-    url = f"https://drive.google.com/uc?id={file_id}"
-    try:
-        output = gdown.download(url, db_path, quiet=True)
-        if output:
+
+    if os.path.exists(db_path):
+        file_size = os.path.getsize(db_path)
+        if file_size > 1000:
             return db_path
-    except:
-        pass
-    st.error("❌ Error al descargar la base de datos.")
-    return None
+        else:
+            os.remove(db_path)
+
+    try:
+        file_id = "1YDmVjf5Nrz9Llgtka3KQMBUKwsnSF5vk"
+        url = f"https://drive.google.com/uc?id={file_id}"
+
+        progress_container = st.container()
+        with progress_container:
+            st.info("🔄 Descargando base de datos... Esto puede tardar unos segundos.")
+            progress_bar = st.progress(10)
+            status_text = st.empty()
+
+            try:
+                status_text.text("Conectando con Google Drive...")
+                output = gdown.download(url, db_path, quiet=True)
+                if output:
+                    progress_bar.progress(100)
+                    status_text.text("✅ Base de datos descargada exitosamente!")
+                    time.sleep(1)
+                    return db_path
+                else:
+                    raise Exception("gdown no pudo descargar el archivo")
+            except Exception:
+                status_text.text("Intentando método alternativo...")
+                progress_bar.progress(50)
+
+                session = requests.Session()
+                response = session.get(f"https://drive.google.com/uc?export=download&id={file_id}", stream=True)
+
+                token = None
+                for key, value in response.cookies.items():
+                    if key.startswith('download_warning'):
+                        token = value
+                        break
+
+                urls = [f"https://drive.google.com/uc?export=download&id={file_id}"]
+                if token:
+                    urls.insert(0, f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}")
+
+                for url in urls:
+                    try:
+                        response = session.get(url, stream=True, timeout=300)
+                        if response.status_code == 200 and 'text/html' not in response.headers.get('content-type', ''):
+                            total_size = int(response.headers.get('content-length', 0))
+                            block_size = 8192
+                            downloaded = 0
+                            temp_path = db_path + ".tmp"
+
+                            with open(temp_path, 'wb') as f:
+                                for chunk in response.iter_content(block_size):
+                                    if chunk:
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        if total_size > 0:
+                                            progress = int(50 + (downloaded / total_size) * 50)
+                                            progress_bar.progress(progress)
+                                            status_text.text(f"Descargando... {downloaded / 1024 / 1024:.1f} MB")
+
+                            try:
+                                conn = sqlite3.connect(temp_path)
+                                cursor = conn.cursor()
+                                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
+                                cursor.close()
+                                conn.close()
+
+                                os.rename(temp_path, db_path)
+                                progress_bar.progress(100)
+                                status_text.text("✅ Base de datos descargada y verificada!")
+                                time.sleep(1)
+                                return db_path
+
+                            except sqlite3.DatabaseError:
+                                os.remove(temp_path)
+                                status_text.text("❌ Archivo descargado no válido (no es SQLite)")
+                                continue
+                    except:
+                        continue
+
+                raise Exception("No se pudo descargar el archivo.")
+    except Exception as e:
+        st.error(f"❌ Error al descargar base de datos: {str(e)}")
+        st.error("Verifica que el archivo sea público en Drive.")
+        return None
+    finally:
+        if 'progress_container' in locals():
+            progress_container.empty()
 
 @st.cache_resource
 def init_database():
@@ -103,7 +183,6 @@ def consulta(pregunta_usuario):
         if not es_consulta_segura(consulta_sql):
             return "❌ Consulta bloqueada por seguridad. Solo se permiten operaciones SELECT."
 
-        # Agregar LIMIT 1000 si no existe en la consulta
         if "limit" not in consulta_sql.lower():
             consulta_sql += " LIMIT 1000"
 
@@ -138,7 +217,7 @@ def consulta(pregunta_usuario):
     except Exception as e:
         return f"⚠️ Error: {str(e)}"
 
-# Interfaz
+# Interfaz de usuario
 st.title("🛡️ Chat SQL Seguro (solo SELECT)")
 user_input = st.text_input("Haz una pregunta:")
 if st.button("Consultar") and user_input:
